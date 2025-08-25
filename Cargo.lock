@@ -917,6 +917,7 @@ dependencies = [
  "crossterm",
  "directories",
  "feed-rs",
+ "log",
  "open",
  "ratatui",
  "reqwest",
