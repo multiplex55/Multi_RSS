@@ -1,2 +1,2 @@
-# Multi_RSS
+# mrss
 Multi RSS Reader
