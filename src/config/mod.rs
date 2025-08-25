@@ -6,7 +6,7 @@ use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 
 /// Global application configuration.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     pub ui: Ui,
     pub opener: Opener,
@@ -19,7 +19,7 @@ pub struct Ui {
     pub unread_only: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Opener {
     pub command: String,
 }
@@ -38,44 +38,11 @@ pub enum Theme {
     Light,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            ui: Ui::default(),
-            opener: Opener::default(),
-            keys: Keys::default(),
-        }
-    }
-}
-
 impl Default for Ui {
     fn default() -> Self {
         Self {
             theme: Theme::Dark,
             unread_only: true,
-        }
-    }
-}
-
-impl Default for Opener {
-    fn default() -> Self {
-        #[cfg(target_os = "windows")]
-        {
-            Self {
-                command: "start".into(),
-            }
-        }
-        #[cfg(target_os = "macos")]
-        {
-            Self {
-                command: "open".into(),
-            }
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        {
-            Self {
-                command: "xdg-open".into(),
-            }
         }
     }
 }
@@ -116,8 +83,7 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let data = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let data = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, data)
     }
 }

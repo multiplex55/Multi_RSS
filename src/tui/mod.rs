@@ -8,6 +8,7 @@ use std::{
     process::Command,
 };
 
+use chrono::{TimeZone, Utc};
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
@@ -28,13 +29,14 @@ use crate::{
 };
 
 /// Application focusable panes.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Pane {
     #[default]
     Groups,
     Feeds,
     Items,
     Preview,
+    Queue,
 }
 
 /// Global application state.
@@ -49,6 +51,7 @@ pub struct AppState {
     pub config: Config,
     pub selected_group: usize,
     pub selected_feed: usize,
+    pub selected_item: usize,
 }
 
 impl AppState {
@@ -65,6 +68,7 @@ impl AppState {
             groups,
             selected_group: 0,
             selected_feed: 0,
+            selected_item: 0,
         }
     }
 }
@@ -92,7 +96,36 @@ fn confirm(msg: &str) -> bool {
 }
 
 fn open_link(opener: &str, url: &str) {
-    let _ = Command::new(opener).arg(url).spawn();
+    if opener.trim().is_empty() {
+        let _ = open::that_in_background(url);
+        return;
+    }
+
+    #[cfg(target_os = "windows")]
+    if opener == "start" {
+        let _ = Command::new("cmd").args(["/c", "start", "", url]).spawn();
+        return;
+    }
+
+    let mut parts = opener.split_whitespace();
+    if let Some(cmd) = parts.next() {
+        let mut command = Command::new(cmd);
+        let mut replaced = false;
+        for part in parts {
+            if part == "%u" {
+                command.arg(url);
+                replaced = true;
+            } else {
+                command.arg(part);
+            }
+        }
+        if !replaced {
+            command.arg(url);
+        }
+        let _ = command.spawn();
+    } else {
+        let _ = open::that_in_background(url);
+    }
 }
 
 fn mark_feed_read(feed: &mut Feed) {
@@ -130,12 +163,14 @@ fn handle_groups_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn st
             if app.selected_group > 0 {
                 app.selected_group -= 1;
                 app.selected_feed = 0;
+                app.selected_item = 0;
             }
         }
         KeyCode::Down => {
             if app.selected_group + 1 < app.groups.len() {
                 app.selected_group += 1;
                 app.selected_feed = 0;
+                app.selected_item = 0;
             }
         }
         KeyCode::Right => {
@@ -149,6 +184,7 @@ fn handle_groups_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn st
                 });
                 app.selected_group = app.groups.len() - 1;
                 app.selected_feed = 0;
+                app.selected_item = 0;
             }
         }
         KeyCode::Char('d') => {
@@ -160,14 +196,15 @@ fn handle_groups_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn st
                         app.selected_group -= 1;
                     }
                     app.selected_feed = 0;
+                    app.selected_item = 0;
                 }
             }
         }
         KeyCode::Char('r') => {
-            if let Some(group) = app.groups.get_mut(app.selected_group) {
-                if let Some(name) = prompt("Rename group:") {
-                    group.name = name;
-                }
+            if let Some(group) = app.groups.get_mut(app.selected_group)
+                && let Some(name) = prompt("Rename group:")
+            {
+                group.name = name;
             }
         }
         KeyCode::Char('A') => {
@@ -176,11 +213,11 @@ fn handle_groups_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn st
             }
         }
         KeyCode::Char('O') => {
-            if let Some(group) = app.groups.get_mut(app.selected_group) {
-                if confirm("Open all unread items in group?") {
-                    let opener = app.config.opener.command.clone();
-                    open_unread_group(group, &opener);
-                }
+            if let Some(group) = app.groups.get_mut(app.selected_group)
+                && confirm("Open all unread items in group?")
+            {
+                let opener = app.config.opener.command.clone();
+                open_unread_group(group, &opener);
             }
         }
         _ => {}
@@ -197,15 +234,20 @@ fn handle_feeds_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std
         KeyCode::Up => {
             if app.selected_feed > 0 {
                 app.selected_feed -= 1;
+                app.selected_item = 0;
             }
         }
         KeyCode::Down => {
             if app.selected_feed + 1 < app.groups[g].feeds.len() {
                 app.selected_feed += 1;
+                app.selected_item = 0;
             }
         }
         KeyCode::Left => {
             app.focus = Pane::Groups;
+        }
+        KeyCode::Right => {
+            app.focus = Pane::Items;
         }
         KeyCode::Char('a') => {
             if let Some(url) = prompt("Feed URL:") {
@@ -216,6 +258,7 @@ fn handle_feeds_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std
                 };
                 app.groups[g].feeds.push(feed);
                 app.selected_feed = app.groups[g].feeds.len() - 1;
+                app.selected_item = 0;
             }
         }
         KeyCode::Char('d') => {
@@ -227,6 +270,7 @@ fn handle_feeds_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std
                         app.selected_feed -= 1;
                     }
                     app.groups[g].update_unread();
+                    app.selected_item = 0;
                 }
             }
         }
@@ -242,6 +286,105 @@ fn handle_feeds_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std
                 open_unread_feed(feed, &opener);
                 app.groups[g].update_unread();
             }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_items_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
+    if app.groups.is_empty() {
+        return Ok(());
+    }
+    let g = app.selected_group;
+    if app.groups[g].feeds.is_empty() {
+        return Ok(());
+    }
+    let f = app.selected_feed;
+    let items_len = app.groups[g].feeds[f].items.len();
+    if items_len == 0 {
+        return Ok(());
+    }
+    match code {
+        KeyCode::Up => {
+            if app.selected_item > 0 {
+                app.selected_item -= 1;
+            }
+        }
+        KeyCode::Down => {
+            if app.selected_item + 1 < items_len {
+                app.selected_item += 1;
+            }
+        }
+        KeyCode::Left => {
+            app.focus = Pane::Feeds;
+        }
+        KeyCode::Enter => {
+            let opener = app.config.opener.command.clone();
+            let item = &app.groups[g].feeds[f].items[app.selected_item];
+            open_link(&opener, &item.link);
+        }
+        KeyCode::Char(' ') => {
+            let item = &mut app.groups[g].feeds[f].items[app.selected_item];
+            item.read = !item.read;
+            app.groups[g].update_unread();
+        }
+        KeyCode::Char('m') => {
+            let item = &mut app.groups[g].feeds[f].items[app.selected_item];
+            item.read = true;
+            app.groups[g].update_unread();
+        }
+        KeyCode::Char('M') => {
+            let item = &mut app.groups[g].feeds[f].items[app.selected_item];
+            item.read = false;
+            app.groups[g].update_unread();
+        }
+        KeyCode::Char('q') => {
+            let item = &mut app.groups[g].feeds[f].items[app.selected_item];
+            item.queued = !item.queued;
+            if item.queued {
+                app.queue.push(item.clone());
+            } else {
+                app.queue.retain(|i| i.id != item.id);
+            }
+        }
+        KeyCode::Delete => {
+            let item = &mut app.groups[g].feeds[f].items[app.selected_item];
+            if item.queued {
+                item.queued = false;
+                app.queue.retain(|i| i.id != item.id);
+            }
+        }
+        KeyCode::Char('Q') => {
+            app.focus = Pane::Queue;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_queue_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.focus = Pane::Items;
+        }
+        KeyCode::Enter => {
+            let opener = app.config.opener.command.clone();
+            let ids: Vec<String> = app.queue.iter().map(|i| i.id.clone()).collect();
+            for id in ids {
+                for group in &mut app.groups {
+                    for feed in &mut group.feeds {
+                        if let Some(item) = feed.items.iter_mut().find(|it| it.id == id) {
+                            open_link(&opener, &item.link);
+                            item.read = true;
+                            item.queued = false;
+                        }
+                    }
+                    group.update_unread();
+                }
+            }
+            app.queue.clear();
+            app.focus = Pane::Items;
         }
         _ => {}
     }
@@ -267,21 +410,28 @@ pub fn run_app(app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| Duration::from_secs(0));
         if event::poll(timeout)? {
             match event::read()? {
-                Event::Key(key) => match key.code {
-                    KeyCode::Char('q') => {
+                Event::Key(key) => {
+                    if key.code == KeyCode::F(1) {
+                        app.show_help = !app.show_help;
+                    } else if key.code == KeyCode::Char('Q') {
+                        app.focus = Pane::Queue;
+                    } else if key.code == KeyCode::Char('q')
+                        && app.focus != Pane::Items
+                        && app.focus != Pane::Queue
+                    {
                         data::save_db(&app.groups)?;
                         app.config.save()?;
                         break;
+                    } else {
+                        match app.focus {
+                            Pane::Groups => handle_groups_key(key.code, app)?,
+                            Pane::Feeds => handle_feeds_key(key.code, app)?,
+                            Pane::Items => handle_items_key(key.code, app)?,
+                            Pane::Queue => handle_queue_key(key.code, app)?,
+                            _ => {}
+                        }
                     }
-                    KeyCode::F(1) => {
-                        app.show_help = !app.show_help;
-                    }
-                    _ => match app.focus {
-                        Pane::Groups => handle_groups_key(key.code, app)?,
-                        Pane::Feeds => handle_feeds_key(key.code, app)?,
-                        _ => {}
-                    },
-                },
+                }
                 Event::Resize(_, _) => {
                     // just trigger a redraw on next loop
                 }
@@ -346,12 +496,47 @@ fn ui(f: &mut Frame, app: &AppState) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[2]);
 
-    let items_block = Block::default().title("Items").borders(Borders::ALL);
-    f.render_widget(items_block, right_chunks[0]);
+    let items = feeds
+        .get(app.selected_feed)
+        .map(|f| f.items.as_slice())
+        .unwrap_or(&[]);
+    let item_entries: Vec<ListItem> = items
+        .iter()
+        .map(|i| {
+            let badge = if i.read { " " } else { "●" };
+            let ts = Utc
+                .timestamp_opt(i.timestamp, 0)
+                .single()
+                .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
+                .format("%m-%d %H:%M")
+                .to_string();
+            ListItem::new(format!("{} {} {}", badge, ts, i.title))
+        })
+        .collect();
+    let items_list =
+        List::new(item_entries).block(Block::default().title("Items").borders(Borders::ALL));
+    let mut item_state = ListState::default();
+    if !items.is_empty() {
+        item_state.select(Some(app.selected_item.min(items.len() - 1)));
+    }
+    f.render_stateful_widget(items_list, right_chunks[0], &mut item_state);
 
-    let preview_block = Block::default().title("Preview").borders(Borders::ALL);
-    f.render_widget(preview_block, right_chunks[1]);
+    let preview_lines = if let Some(item) = items.get(app.selected_item) {
+        vec![
+            Line::from(item.title.clone()),
+            Line::from(""),
+            Line::from(item.desc.clone()),
+        ]
+    } else {
+        vec![Line::from("")]
+    };
+    let preview = Paragraph::new(preview_lines)
+        .block(Block::default().title("Preview").borders(Borders::ALL));
+    f.render_widget(preview, right_chunks[1]);
 
+    if app.focus == Pane::Queue {
+        draw_queue(f, f.size(), app);
+    }
     if app.show_help {
         draw_help(f, f.size());
     }
@@ -365,6 +550,19 @@ fn draw_help(f: &mut Frame, area: Rect) {
     let popup_area = centered_rect(60, 40, area);
     f.render_widget(Clear, popup_area); // clear under the popup
     f.render_widget(paragraph, popup_area);
+}
+
+fn draw_queue(f: &mut Frame, area: Rect, app: &AppState) {
+    let block = Block::default().title("Queue").borders(Borders::ALL);
+    let items: Vec<ListItem> = app
+        .queue
+        .iter()
+        .map(|i| ListItem::new(i.title.clone()))
+        .collect();
+    let list = List::new(items).block(block);
+    let popup_area = centered_rect(60, 60, area);
+    f.render_widget(Clear, popup_area);
+    f.render_widget(list, popup_area);
 }
 
 /// Helper to create a centered rect using up certain percentage of the available space.

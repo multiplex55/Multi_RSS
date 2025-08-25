@@ -914,6 +914,7 @@ dependencies = [
 name = "mrss"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "crossterm",
  "directories",
  "feed-rs",

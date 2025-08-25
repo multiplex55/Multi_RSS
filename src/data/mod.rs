@@ -160,11 +160,11 @@ pub fn load_db() -> io::Result<Vec<Group>> {
 /// Save the database to disk.
 pub fn save_db(db: &[Group]) -> io::Result<()> {
     let path = db_path().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "data dir"))?;
-    if let Some(parent) = path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            error!("Failed to create {}: {}", parent.display(), e);
-            return Err(e);
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        error!("Failed to create {}: {}", parent.display(), e);
+        return Err(e);
     }
     match serde_json::to_string_pretty(db) {
         Ok(json) => fs::write(&path, json).map_err(|e| {
