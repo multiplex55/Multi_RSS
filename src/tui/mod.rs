@@ -538,7 +538,11 @@ pub fn run_app(app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
 fn ui(f: &mut Frame, app: &AppState) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(f.size());
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -663,12 +667,71 @@ fn ui(f: &mut Frame, app: &AppState) {
     let status_bar = Paragraph::new(status);
     f.render_widget(status_bar, outer[1]);
 
+    let keybinds = Paragraph::new(keybind_line(app));
+    f.render_widget(keybinds, outer[2]);
+
     if app.focus == Pane::Queue {
         draw_queue(f, f.size(), app);
     }
     if app.show_help {
         draw_help(f, f.size());
     }
+}
+
+/// Build the keybind hint line for the status bar.
+fn keybind_line(app: &AppState) -> Line<'static> {
+    let mut parts: Vec<String> = vec![
+        "Tab:Next pane".into(),
+        "BackTab:Prev pane".into(),
+        if app.config.ui.unread_only {
+            "u:Show all".into()
+        } else {
+            "u:Unread only".into()
+        },
+        "Ctrl+f:Search".into(),
+        "?:Help".into(),
+        "Q:Queue".into(),
+    ];
+
+    if !matches!(app.focus, Pane::Items | Pane::Queue) {
+        parts.push("q:Quit".into());
+    }
+
+    match app.focus {
+        Pane::Groups => {
+            parts.extend([
+                "a:Add group".into(),
+                "d:Del group".into(),
+                "r:Rename".into(),
+                "A:Mark read".into(),
+                "O:Open unread".into(),
+            ]);
+        }
+        Pane::Feeds => {
+            parts.extend([
+                "a:Add feed".into(),
+                "d:Del feed".into(),
+                "A:Mark read".into(),
+                "O:Open unread".into(),
+            ]);
+        }
+        Pane::Items => {
+            parts.extend([
+                "Enter:Open".into(),
+                "Space:Toggle read".into(),
+                "m:Mark read".into(),
+                "M:Mark unread".into(),
+                "q:Queue".into(),
+                "Delete:Dequeue".into(),
+            ]);
+        }
+        Pane::Queue => {
+            parts.extend(["Enter:Open all".into(), "Esc/q:Close".into()]);
+        }
+        Pane::Preview => {}
+    }
+
+    Line::from(parts.join(" | "))
 }
 
 /// Render the help overlay showing key bindings.
