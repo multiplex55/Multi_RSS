@@ -466,7 +466,7 @@ pub fn run_app(app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if key.code == KeyCode::F(1) {
+                    if key.code == KeyCode::Char('?') {
                         app.show_help = !app.show_help;
                     } else if key.code == KeyCode::Char('Q') {
                         app.focus = Pane::Queue;
@@ -737,7 +737,14 @@ fn keybind_line(app: &AppState) -> Line<'static> {
 /// Render the help overlay showing key bindings.
 fn draw_help(f: &mut Frame, area: Rect) {
     let block = Block::default().title("Help").borders(Borders::ALL);
-    let text = vec![Line::from("F1: Toggle help"), Line::from("q: Quit")];
+    let text = vec![
+        Line::from("?: Toggle help"),
+        Line::from("q: Quit"),
+        Line::from("Tab/BackTab: Switch panes"),
+        Line::from("Ctrl+f: Search"),
+        Line::from("Q: Queue"),
+        Line::from("u: Toggle unread only"),
+    ];
     let paragraph = Paragraph::new(text).block(block).style(Style::default());
     let popup_area = centered_rect(60, 40, area);
     f.render_widget(Clear, popup_area); // clear under the popup

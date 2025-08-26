@@ -1,6 +1,8 @@
 # mrss
 Multi RSS Reader
 
+Press `?` in the terminal UI to view available key bindings.
+
 ## Configuration
 
 Configuration is stored in a platform-specific directory:
