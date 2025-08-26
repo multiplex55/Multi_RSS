@@ -19,7 +19,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Color, Style},
     text::Line,
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
@@ -558,8 +558,16 @@ fn ui(f: &mut Frame, app: &AppState) {
         .iter()
         .map(|g| ListItem::new(g.name.clone()))
         .collect();
-    let groups_list =
-        List::new(group_items).block(Block::default().title("Groups").borders(Borders::ALL));
+    let groups_list = List::new(group_items).block(
+        Block::default()
+            .title("Groups")
+            .border_style(if app.focus == Pane::Groups {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            })
+            .borders(Borders::ALL),
+    );
     let mut group_state = ListState::default();
     if !groups_guard.is_empty() {
         group_state.select(Some(app.selected_group.min(groups_guard.len() - 1)));
@@ -574,8 +582,16 @@ fn ui(f: &mut Frame, app: &AppState) {
         .iter()
         .map(|f| ListItem::new(f.title.clone()))
         .collect();
-    let feeds_list =
-        List::new(feed_items).block(Block::default().title("Feeds").borders(Borders::ALL));
+    let feeds_list = List::new(feed_items).block(
+        Block::default()
+            .title("Feeds")
+            .border_style(if app.focus == Pane::Feeds {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            })
+            .borders(Borders::ALL),
+    );
     let mut feed_state = ListState::default();
     if !feeds.is_empty() {
         feed_state.select(Some(app.selected_feed.min(feeds.len() - 1)));
@@ -631,8 +647,16 @@ fn ui(f: &mut Frame, app: &AppState) {
     } else {
         Vec::new()
     };
-    let items_list =
-        List::new(item_entries).block(Block::default().title("Items").borders(Borders::ALL));
+    let items_list = List::new(item_entries).block(
+        Block::default()
+            .title("Items")
+            .border_style(if app.focus == Pane::Items {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            })
+            .borders(Borders::ALL),
+    );
     let mut item_state = ListState::default();
     if !indices.is_empty() {
         item_state.select(Some(app.selected_item.min(indices.len() - 1)));
@@ -651,8 +675,16 @@ fn ui(f: &mut Frame, app: &AppState) {
     } else {
         vec![Line::from("")]
     };
-    let preview = Paragraph::new(preview_lines)
-        .block(Block::default().title("Preview").borders(Borders::ALL));
+    let preview = Paragraph::new(preview_lines).block(
+        Block::default()
+            .title("Preview")
+            .border_style(if app.focus == Pane::Preview {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            })
+            .borders(Borders::ALL),
+    );
     f.render_widget(preview, right_chunks[1]);
 
     let status = if let Some(time) = app.last_refresh {
