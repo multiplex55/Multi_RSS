@@ -40,6 +40,18 @@ pub enum Pane {
     Queue,
 }
 
+/// Action to perform when an input popup is submitted.
+pub enum InputAction {
+    AddGroup,
+}
+
+/// Transient state for text input popups.
+pub struct InputPopup {
+    pub title: String,
+    pub buffer: String,
+    pub submit: InputAction,
+}
+
 /// Global application state.
 pub struct AppState {
     pub focus: Pane,
@@ -54,6 +66,7 @@ pub struct AppState {
     pub last_refresh: Option<DateTime<Utc>>,
     pub new_items: usize,
     pub status_rx: Receiver<(DateTime<Utc>, usize)>,
+    pub input_popup: Option<InputPopup>,
 }
 
 impl AppState {
@@ -76,10 +89,12 @@ impl AppState {
             last_refresh: None,
             new_items: 0,
             status_rx,
+            input_popup: None,
         }
     }
 }
 
+#[deprecated]
 fn prompt(msg: &str) -> Option<String> {
     disable_raw_mode().ok()?;
     print!("{} ", msg);
@@ -221,15 +236,11 @@ fn handle_groups_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn st
             app.focus = Pane::Feeds;
         }
         KeyCode::Char('a') => {
-            if let Some(name) = prompt("New group name:") {
-                groups.push(Group {
-                    name,
-                    ..Group::default()
-                });
-                app.selected_group = groups.len() - 1;
-                app.selected_feed = 0;
-                app.selected_item = 0;
-            }
+            app.input_popup = Some(InputPopup {
+                title: "New Group".into(),
+                buffer: String::new(),
+                submit: InputAction::AddGroup,
+            });
         }
         KeyCode::Char('d') => {
             if !groups.is_empty() {
@@ -466,7 +477,38 @@ pub fn run_app(app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
         if event::poll(timeout)? {
             match event::read()? {
                 Event::Key(key) => {
-                    if key.code == KeyCode::Char('?') {
+                    if let Some(popup) = app.input_popup.as_mut() {
+                        match key.code {
+                            KeyCode::Char(c) if key.modifiers.is_empty() => {
+                                popup.buffer.push(c);
+                            }
+                            KeyCode::Backspace => {
+                                popup.buffer.pop();
+                            }
+                            KeyCode::Enter => {
+                                match popup.submit {
+                                    InputAction::AddGroup => {
+                                        let mut groups = app.groups.lock().unwrap();
+                                        let name = popup.buffer.trim().to_string();
+                                        if !name.is_empty() {
+                                            groups.push(Group {
+                                                name: name.clone(),
+                                                ..Group::default()
+                                            });
+                                            app.selected_group = groups.len() - 1;
+                                            app.selected_feed = 0;
+                                            app.selected_item = 0;
+                                        }
+                                    }
+                                }
+                                app.input_popup = None;
+                            }
+                            KeyCode::Esc => {
+                                app.input_popup = None;
+                            }
+                            _ => {}
+                        }
+                    } else if key.code == KeyCode::Char('?') {
                         app.show_help = !app.show_help;
                     } else if key.code == KeyCode::Char('Q') {
                         app.focus = Pane::Queue;
@@ -702,6 +744,9 @@ fn ui(f: &mut Frame, app: &AppState) {
     let keybinds = Paragraph::new(keybind_line(app));
     f.render_widget(keybinds, outer[2]);
 
+    if let Some(popup) = &app.input_popup {
+        draw_input_popup(f, f.size(), popup);
+    }
     if app.focus == Pane::Queue {
         draw_queue(f, f.size(), app);
     }
@@ -780,6 +825,16 @@ fn draw_help(f: &mut Frame, area: Rect) {
     let paragraph = Paragraph::new(text).block(block).style(Style::default());
     let popup_area = centered_rect(60, 40, area);
     f.render_widget(Clear, popup_area); // clear under the popup
+    f.render_widget(paragraph, popup_area);
+}
+
+fn draw_input_popup(f: &mut Frame, area: Rect, popup: &InputPopup) {
+    let block = Block::default()
+        .title(popup.title.as_str())
+        .borders(Borders::ALL);
+    let paragraph = Paragraph::new(popup.buffer.as_str()).block(block);
+    let popup_area = centered_rect(60, 20, area);
+    f.render_widget(Clear, popup_area);
     f.render_widget(paragraph, popup_area);
 }
 
