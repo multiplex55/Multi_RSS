@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 use std::{
     io::{self, Write},
     process::Command,
+    sync::{Arc, Mutex, mpsc::Receiver},
 };
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -42,9 +43,7 @@ pub enum Pane {
 /// Global application state.
 pub struct AppState {
     pub focus: Pane,
-    pub groups: Vec<Group>,
-    pub feeds: Vec<Feed>,
-    pub items: Vec<Item>,
+    pub groups: Arc<Mutex<Vec<Group>>>,
     pub queue: Vec<Item>,
     pub search: String,
     pub show_help: bool,
@@ -52,15 +51,20 @@ pub struct AppState {
     pub selected_group: usize,
     pub selected_feed: usize,
     pub selected_item: usize,
+    pub last_refresh: Option<DateTime<Utc>>,
+    pub new_items: usize,
+    pub status_rx: Receiver<(DateTime<Utc>, usize)>,
 }
 
 impl AppState {
     /// Create a new application state with loaded configuration and groups.
-    pub fn new(config: Config, groups: Vec<Group>) -> Self {
+    pub fn new(
+        config: Config,
+        groups: Arc<Mutex<Vec<Group>>>,
+        status_rx: Receiver<(DateTime<Utc>, usize)>,
+    ) -> Self {
         Self {
             focus: Pane::Groups,
-            feeds: Vec::new(),
-            items: Vec::new(),
             queue: Vec::new(),
             search: String::new(),
             show_help: false,
@@ -69,6 +73,9 @@ impl AppState {
             selected_group: 0,
             selected_feed: 0,
             selected_item: 0,
+            last_refresh: None,
+            new_items: 0,
+            status_rx,
         }
     }
 }
@@ -157,7 +164,44 @@ fn open_unread_group(group: &mut Group, opener: &str) {
     group.update_unread();
 }
 
+/// Compute visible item indices based on search and unread filters and sort order.
+fn visible_indices(app: &AppState) -> Vec<usize> {
+    let groups = app.groups.lock().unwrap();
+    if groups.is_empty() {
+        return Vec::new();
+    }
+    let g = app.selected_group;
+    if groups[g].feeds.is_empty() {
+        return Vec::new();
+    }
+    let f = app.selected_feed;
+    let items = &groups[g].feeds[f].items;
+    let query = app.search.to_lowercase();
+    let mut idx: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| {
+            (!app.config.ui.unread_only || !i.read)
+                && (query.is_empty() || i.title.to_lowercase().contains(&query))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    match app.config.ui.sort {
+        crate::config::SortOrder::Date => {
+            idx.sort_by(|&a, &b| items[b].timestamp.cmp(&items[a].timestamp))
+        }
+        crate::config::SortOrder::Title => {
+            idx.sort_by(|&a, &b| items[a].title.cmp(&items[b].title))
+        }
+        crate::config::SortOrder::Channel => {
+            // items belong to same feed; keep original order
+        }
+    }
+    idx
+}
+
 fn handle_groups_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
+    let mut groups = app.groups.lock().unwrap();
     match code {
         KeyCode::Up => {
             if app.selected_group > 0 {
@@ -167,7 +211,7 @@ fn handle_groups_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn st
             }
         }
         KeyCode::Down => {
-            if app.selected_group + 1 < app.groups.len() {
+            if app.selected_group + 1 < groups.len() {
                 app.selected_group += 1;
                 app.selected_feed = 0;
                 app.selected_item = 0;
@@ -178,21 +222,21 @@ fn handle_groups_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn st
         }
         KeyCode::Char('a') => {
             if let Some(name) = prompt("New group name:") {
-                app.groups.push(Group {
+                groups.push(Group {
                     name,
                     ..Group::default()
                 });
-                app.selected_group = app.groups.len() - 1;
+                app.selected_group = groups.len() - 1;
                 app.selected_feed = 0;
                 app.selected_item = 0;
             }
         }
         KeyCode::Char('d') => {
-            if !app.groups.is_empty() {
-                let name = app.groups[app.selected_group].name.clone();
+            if !groups.is_empty() {
+                let name = groups[app.selected_group].name.clone();
                 if confirm(&format!("Delete group '{}' ?", name)) {
-                    app.groups.remove(app.selected_group);
-                    if app.selected_group >= app.groups.len() && app.selected_group > 0 {
+                    groups.remove(app.selected_group);
+                    if app.selected_group >= groups.len() && app.selected_group > 0 {
                         app.selected_group -= 1;
                     }
                     app.selected_feed = 0;
@@ -201,19 +245,19 @@ fn handle_groups_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn st
             }
         }
         KeyCode::Char('r') => {
-            if let Some(group) = app.groups.get_mut(app.selected_group)
+            if let Some(group) = groups.get_mut(app.selected_group)
                 && let Some(name) = prompt("Rename group:")
             {
                 group.name = name;
             }
         }
         KeyCode::Char('A') => {
-            if let Some(group) = app.groups.get_mut(app.selected_group) {
+            if let Some(group) = groups.get_mut(app.selected_group) {
                 mark_group_read(group);
             }
         }
         KeyCode::Char('O') => {
-            if let Some(group) = app.groups.get_mut(app.selected_group)
+            if let Some(group) = groups.get_mut(app.selected_group)
                 && confirm("Open all unread items in group?")
             {
                 let opener = app.config.opener.command.clone();
@@ -226,7 +270,8 @@ fn handle_groups_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn st
 }
 
 fn handle_feeds_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
-    if app.groups.is_empty() {
+    let mut groups = app.groups.lock().unwrap();
+    if groups.is_empty() {
         return Ok(());
     }
     let g = app.selected_group;
@@ -238,7 +283,7 @@ fn handle_feeds_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std
             }
         }
         KeyCode::Down => {
-            if app.selected_feed + 1 < app.groups[g].feeds.len() {
+            if app.selected_feed + 1 < groups[g].feeds.len() {
                 app.selected_feed += 1;
                 app.selected_item = 0;
             }
@@ -256,35 +301,35 @@ fn handle_feeds_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std
                     title: url,
                     ..Feed::default()
                 };
-                app.groups[g].feeds.push(feed);
-                app.selected_feed = app.groups[g].feeds.len() - 1;
+                groups[g].feeds.push(feed);
+                app.selected_feed = groups[g].feeds.len() - 1;
                 app.selected_item = 0;
             }
         }
         KeyCode::Char('d') => {
-            if !app.groups[g].feeds.is_empty() {
-                let title = app.groups[g].feeds[app.selected_feed].title.clone();
+            if !groups[g].feeds.is_empty() {
+                let title = groups[g].feeds[app.selected_feed].title.clone();
                 if confirm(&format!("Delete feed '{}' ?", title)) {
-                    app.groups[g].feeds.remove(app.selected_feed);
-                    if app.selected_feed >= app.groups[g].feeds.len() && app.selected_feed > 0 {
+                    groups[g].feeds.remove(app.selected_feed);
+                    if app.selected_feed >= groups[g].feeds.len() && app.selected_feed > 0 {
                         app.selected_feed -= 1;
                     }
-                    app.groups[g].update_unread();
+                    groups[g].update_unread();
                     app.selected_item = 0;
                 }
             }
         }
         KeyCode::Char('A') => {
-            if let Some(feed) = app.groups[g].feeds.get_mut(app.selected_feed) {
+            if let Some(feed) = groups[g].feeds.get_mut(app.selected_feed) {
                 mark_feed_read(feed);
-                app.groups[g].update_unread();
+                groups[g].update_unread();
             }
         }
         KeyCode::Char('O') => {
-            if let Some(feed) = app.groups[g].feeds.get_mut(app.selected_feed) {
+            if let Some(feed) = groups[g].feeds.get_mut(app.selected_feed) {
                 let opener = app.config.opener.command.clone();
                 open_unread_feed(feed, &opener);
-                app.groups[g].update_unread();
+                groups[g].update_unread();
             }
         }
         _ => {}
@@ -293,17 +338,16 @@ fn handle_feeds_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std
 }
 
 fn handle_items_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
-    if app.groups.is_empty() {
+    let indices = visible_indices(app);
+    if indices.is_empty() {
         return Ok(());
     }
+    let mut groups = app.groups.lock().unwrap();
     let g = app.selected_group;
-    if app.groups[g].feeds.is_empty() {
-        return Ok(());
-    }
     let f = app.selected_feed;
-    let items_len = app.groups[g].feeds[f].items.len();
-    if items_len == 0 {
-        return Ok(());
+    let items_len = indices.len();
+    if app.selected_item >= items_len {
+        app.selected_item = items_len.saturating_sub(1);
     }
     match code {
         KeyCode::Up => {
@@ -321,26 +365,31 @@ fn handle_items_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std
         }
         KeyCode::Enter => {
             let opener = app.config.opener.command.clone();
-            let item = &app.groups[g].feeds[f].items[app.selected_item];
+            let idx = indices[app.selected_item];
+            let item = &groups[g].feeds[f].items[idx];
             open_link(&opener, &item.link);
         }
         KeyCode::Char(' ') => {
-            let item = &mut app.groups[g].feeds[f].items[app.selected_item];
+            let idx = indices[app.selected_item];
+            let item = &mut groups[g].feeds[f].items[idx];
             item.read = !item.read;
-            app.groups[g].update_unread();
+            groups[g].update_unread();
         }
         KeyCode::Char('m') => {
-            let item = &mut app.groups[g].feeds[f].items[app.selected_item];
+            let idx = indices[app.selected_item];
+            let item = &mut groups[g].feeds[f].items[idx];
             item.read = true;
-            app.groups[g].update_unread();
+            groups[g].update_unread();
         }
         KeyCode::Char('M') => {
-            let item = &mut app.groups[g].feeds[f].items[app.selected_item];
+            let idx = indices[app.selected_item];
+            let item = &mut groups[g].feeds[f].items[idx];
             item.read = false;
-            app.groups[g].update_unread();
+            groups[g].update_unread();
         }
         KeyCode::Char('q') => {
-            let item = &mut app.groups[g].feeds[f].items[app.selected_item];
+            let idx = indices[app.selected_item];
+            let item = &mut groups[g].feeds[f].items[idx];
             item.queued = !item.queued;
             if item.queued {
                 app.queue.push(item.clone());
@@ -349,7 +398,8 @@ fn handle_items_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std
             }
         }
         KeyCode::Delete => {
-            let item = &mut app.groups[g].feeds[f].items[app.selected_item];
+            let idx = indices[app.selected_item];
+            let item = &mut groups[g].feeds[f].items[idx];
             if item.queued {
                 item.queued = false;
                 app.queue.retain(|i| i.id != item.id);
@@ -371,8 +421,9 @@ fn handle_queue_key(code: KeyCode, app: &mut AppState) -> Result<(), Box<dyn std
         KeyCode::Enter => {
             let opener = app.config.opener.command.clone();
             let ids: Vec<String> = app.queue.iter().map(|i| i.id.clone()).collect();
+            let mut groups = app.groups.lock().unwrap();
             for id in ids {
-                for group in &mut app.groups {
+                for group in groups.iter_mut() {
                     for feed in &mut group.feeds {
                         if let Some(item) = feed.items.iter_mut().find(|it| it.id == id) {
                             open_link(&opener, &item.link);
@@ -403,6 +454,10 @@ pub fn run_app(app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_tick = Instant::now();
 
     loop {
+        if let Ok((time, new)) = app.status_rx.try_recv() {
+            app.last_refresh = Some(time);
+            app.new_items = new;
+        }
         terminal.draw(|f| ui(f, app))?;
 
         let timeout = tick_rate
@@ -419,9 +474,38 @@ pub fn run_app(app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
                         && app.focus != Pane::Items
                         && app.focus != Pane::Queue
                     {
-                        data::save_db(&app.groups)?;
+                        let groups = app.groups.lock().unwrap();
+                        data::save_db(&groups)?;
                         app.config.save()?;
                         break;
+                    } else if key.code == KeyCode::Char('u') && key.modifiers.is_empty() {
+                        app.config.ui.unread_only = !app.config.ui.unread_only;
+                        app.selected_item = 0;
+                    } else if key.code == KeyCode::Tab {
+                        app.focus = match app.focus {
+                            Pane::Groups => Pane::Feeds,
+                            Pane::Feeds => Pane::Items,
+                            Pane::Items => Pane::Preview,
+                            Pane::Preview => Pane::Groups,
+                            Pane::Queue => Pane::Queue,
+                        };
+                    } else if key.code == KeyCode::BackTab {
+                        app.focus = match app.focus {
+                            Pane::Groups => Pane::Preview,
+                            Pane::Feeds => Pane::Groups,
+                            Pane::Items => Pane::Feeds,
+                            Pane::Preview => Pane::Items,
+                            Pane::Queue => Pane::Queue,
+                        };
+                    } else if key.code == KeyCode::Char('f')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        if let Some(q) = prompt("Search:") {
+                            app.search = q;
+                        } else {
+                            app.search.clear();
+                        }
+                        app.selected_item = 0;
                     } else {
                         match app.focus {
                             Pane::Groups => handle_groups_key(key.code, app)?,
@@ -452,6 +536,10 @@ pub fn run_app(app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Draw the main UI layout.
 fn ui(f: &mut Frame, app: &AppState) {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(f.size());
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -459,23 +547,22 @@ fn ui(f: &mut Frame, app: &AppState) {
             Constraint::Percentage(30),
             Constraint::Percentage(50),
         ])
-        .split(f.size());
+        .split(outer[0]);
 
-    let group_items: Vec<ListItem> = app
-        .groups
+    let groups_guard = app.groups.lock().unwrap();
+    let group_items: Vec<ListItem> = groups_guard
         .iter()
         .map(|g| ListItem::new(g.name.clone()))
         .collect();
     let groups_list =
         List::new(group_items).block(Block::default().title("Groups").borders(Borders::ALL));
     let mut group_state = ListState::default();
-    if !app.groups.is_empty() {
-        group_state.select(Some(app.selected_group.min(app.groups.len() - 1)));
+    if !groups_guard.is_empty() {
+        group_state.select(Some(app.selected_group.min(groups_guard.len() - 1)));
     }
     f.render_stateful_widget(groups_list, chunks[0], &mut group_state);
 
-    let feeds = app
-        .groups
+    let feeds = groups_guard
         .get(app.selected_group)
         .map(|g| g.feeds.as_slice())
         .unwrap_or(&[]);
@@ -496,32 +583,62 @@ fn ui(f: &mut Frame, app: &AppState) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[2]);
 
-    let items = feeds
-        .get(app.selected_feed)
-        .map(|f| f.items.as_slice())
-        .unwrap_or(&[]);
-    let item_entries: Vec<ListItem> = items
-        .iter()
-        .map(|i| {
-            let badge = if i.read { " " } else { "●" };
-            let ts = Utc
-                .timestamp_opt(i.timestamp, 0)
-                .single()
-                .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
-                .format("%m-%d %H:%M")
-                .to_string();
-            ListItem::new(format!("{} {} {}", badge, ts, i.title))
-        })
-        .collect();
+    let indices = if let Some(feed) = feeds.get(app.selected_feed) {
+        let query = app.search.to_lowercase();
+        let mut idx: Vec<usize> = feed
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| {
+                (!app.config.ui.unread_only || !i.read)
+                    && (query.is_empty() || i.title.to_lowercase().contains(&query))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        match app.config.ui.sort {
+            crate::config::SortOrder::Date => {
+                idx.sort_by(|&a, &b| feed.items[b].timestamp.cmp(&feed.items[a].timestamp))
+            }
+            crate::config::SortOrder::Title => {
+                idx.sort_by(|&a, &b| feed.items[a].title.cmp(&feed.items[b].title))
+            }
+            crate::config::SortOrder::Channel => {}
+        }
+        idx
+    } else {
+        Vec::new()
+    };
+
+    let item_entries: Vec<ListItem> = if let Some(feed) = feeds.get(app.selected_feed) {
+        indices
+            .iter()
+            .map(|&i| {
+                let item = &feed.items[i];
+                let badge = if item.read { " " } else { "●" };
+                let ts = Utc
+                    .timestamp_opt(item.timestamp, 0)
+                    .single()
+                    .unwrap_or_else(|| Utc.timestamp_opt(0, 0).unwrap())
+                    .format("%m-%d %H:%M")
+                    .to_string();
+                ListItem::new(format!("{} {} {}", badge, ts, item.title))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let items_list =
         List::new(item_entries).block(Block::default().title("Items").borders(Borders::ALL));
     let mut item_state = ListState::default();
-    if !items.is_empty() {
-        item_state.select(Some(app.selected_item.min(items.len() - 1)));
+    if !indices.is_empty() {
+        item_state.select(Some(app.selected_item.min(indices.len() - 1)));
     }
     f.render_stateful_widget(items_list, right_chunks[0], &mut item_state);
 
-    let preview_lines = if let Some(item) = items.get(app.selected_item) {
+    let preview_lines = if let Some(feed) = feeds.get(app.selected_feed)
+        && let Some(&idx) = indices.get(app.selected_item)
+    {
+        let item = &feed.items[idx];
         vec![
             Line::from(item.title.clone()),
             Line::from(""),
@@ -533,6 +650,18 @@ fn ui(f: &mut Frame, app: &AppState) {
     let preview = Paragraph::new(preview_lines)
         .block(Block::default().title("Preview").borders(Borders::ALL));
     f.render_widget(preview, right_chunks[1]);
+
+    let status = if let Some(time) = app.last_refresh {
+        format!(
+            "last refresh: {} | new items: {}",
+            time.format("%H:%M:%S"),
+            app.new_items
+        )
+    } else {
+        format!("last refresh: never | new items: {}", app.new_items)
+    };
+    let status_bar = Paragraph::new(status);
+    f.render_widget(status_bar, outer[1]);
 
     if app.focus == Pane::Queue {
         draw_queue(f, f.size(), app);

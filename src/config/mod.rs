@@ -11,12 +11,17 @@ pub struct Config {
     pub ui: Ui,
     pub opener: Opener,
     pub keys: Keys,
+    #[serde(default)]
+    pub refresh: Refresh,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Ui {
     pub theme: Theme,
+    #[serde(default)]
     pub unread_only: bool,
+    #[serde(default)]
+    pub sort: SortOrder,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -38,11 +43,36 @@ pub enum Theme {
     Light,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    Date,
+    Title,
+    Channel,
+}
+
+impl Default for SortOrder {
+    fn default() -> Self {
+        SortOrder::Date
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct Refresh {
+    #[serde(default = "default_interval")]
+    pub interval_secs: u64,
+}
+
+const fn default_interval() -> u64 {
+    900
+}
+
 impl Default for Ui {
     fn default() -> Self {
         Self {
             theme: Theme::Dark,
             unread_only: true,
+            sort: SortOrder::Date,
         }
     }
 }
