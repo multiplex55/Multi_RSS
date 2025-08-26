@@ -19,8 +19,8 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    text::Line,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
@@ -817,18 +817,59 @@ fn keybind_line(app: &AppState) -> Line<'static> {
 /// Render the help overlay showing key bindings.
 fn draw_help(f: &mut Frame, area: Rect) {
     let block = Block::default().title("Help").borders(Borders::ALL);
-    let text = vec![
-        Line::from("?: Toggle help"),
-        Line::from("q: Quit"),
-        Line::from("Tab/BackTab: Switch panes"),
-        Line::from("Ctrl+f: Search"),
-        Line::from("Q: Queue"),
-        Line::from("u: Toggle unread only"),
-    ];
-    let paragraph = Paragraph::new(text).block(block).style(Style::default());
     let popup_area = centered_rect(60, 40, area);
-    f.render_widget(Clear, popup_area); // clear under the popup
-    f.render_widget(paragraph, popup_area);
+    let inner = block.inner(popup_area);
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(inner);
+
+    let left_lines = vec![
+        Line::from(vec![Span::styled(
+            "Navigation",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(" Tab/BackTab: Switch panes"),
+        Line::from(" Arrow keys: Navigate"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Group management",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(" a: Add group"),
+        Line::from(" d: Delete group"),
+        Line::from(" r: Rename group"),
+    ];
+
+    let right_lines = vec![
+        Line::from(vec![Span::styled(
+            "Feed & item actions",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(" Enter: Open item"),
+        Line::from(" Space: Toggle read"),
+        Line::from(" m/M: Mark read/unread"),
+        Line::from(" Q: Queue"),
+        Line::from(" Delete: Remove from queue"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Global commands",
+            Style::default().add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(" u: Toggle unread only"),
+        Line::from(" Ctrl+f: Search"),
+        Line::from(" ?: Toggle help"),
+        Line::from(" q: Quit"),
+    ];
+
+    let left = Paragraph::new(left_lines);
+    let right = Paragraph::new(right_lines);
+
+    f.render_widget(Clear, popup_area);
+    f.render_widget(block, popup_area);
+    f.render_widget(left, columns[0]);
+    f.render_widget(right, columns[1]);
 }
 
 fn draw_input_popup(f: &mut Frame, area: Rect, popup: &InputPopup) {
