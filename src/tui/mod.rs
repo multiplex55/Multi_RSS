@@ -11,7 +11,7 @@ use std::{
 
 use chrono::{DateTime, TimeZone, Utc};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -463,6 +463,7 @@ pub fn run_app(app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
 
     let tick_rate = Duration::from_millis(250);
     let mut last_tick = Instant::now();
+    let mut last_key_time = Instant::now();
 
     loop {
         if let Ok((time, new)) = app.status_rx.try_recv() {
@@ -475,93 +476,95 @@ pub fn run_app(app: &mut AppState) -> Result<(), Box<dyn std::error::Error>> {
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
         if event::poll(timeout)? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if let Some(popup) = app.input_popup.as_mut() {
-                        match key.code {
-                            KeyCode::Char(c) if key.modifiers.is_empty() => {
-                                popup.buffer.push(c);
-                            }
-                            KeyCode::Backspace => {
-                                popup.buffer.pop();
-                            }
-                            KeyCode::Enter => {
-                                match popup.submit {
-                                    InputAction::AddGroup => {
-                                        let mut groups = app.groups.lock().unwrap();
-                                        let name = popup.buffer.trim().to_string();
-                                        if !name.is_empty() {
-                                            groups.push(Group {
-                                                name: name.clone(),
-                                                ..Group::default()
-                                            });
-                                            app.selected_group = groups.len() - 1;
-                                            app.selected_feed = 0;
-                                            app.selected_item = 0;
+            let ev = event::read()?;
+            if let Event::Key(key) = ev {
+                if key.kind == KeyEventKind::Press {
+                    if last_key_time.elapsed() >= Duration::from_millis(100) {
+                        last_key_time = Instant::now();
+                        if let Some(popup) = app.input_popup.as_mut() {
+                            match key.code {
+                                KeyCode::Char(c) if key.modifiers.is_empty() => {
+                                    popup.buffer.push(c);
+                                }
+                                KeyCode::Backspace => {
+                                    popup.buffer.pop();
+                                }
+                                KeyCode::Enter => {
+                                    match popup.submit {
+                                        InputAction::AddGroup => {
+                                            let mut groups = app.groups.lock().unwrap();
+                                            let name = popup.buffer.trim().to_string();
+                                            if !name.is_empty() {
+                                                groups.push(Group {
+                                                    name: name.clone(),
+                                                    ..Group::default()
+                                                });
+                                                app.selected_group = groups.len() - 1;
+                                                app.selected_feed = 0;
+                                                app.selected_item = 0;
+                                            }
                                         }
                                     }
+                                    app.input_popup = None;
                                 }
-                                app.input_popup = None;
+                                KeyCode::Esc => {
+                                    app.input_popup = None;
+                                }
+                                _ => {}
                             }
-                            KeyCode::Esc => {
-                                app.input_popup = None;
+                        } else if key.code == KeyCode::Char('?') {
+                            app.show_help = !app.show_help;
+                        } else if key.code == KeyCode::Char('Q') {
+                            app.focus = Pane::Queue;
+                        } else if key.code == KeyCode::Char('q')
+                            && app.focus != Pane::Items
+                            && app.focus != Pane::Queue
+                        {
+                            let groups = app.groups.lock().unwrap();
+                            data::save_db(&groups)?;
+                            app.config.save()?;
+                            break;
+                        } else if key.code == KeyCode::Char('u') && key.modifiers.is_empty() {
+                            app.config.ui.unread_only = !app.config.ui.unread_only;
+                            app.selected_item = 0;
+                        } else if key.code == KeyCode::Tab {
+                            app.focus = match app.focus {
+                                Pane::Groups => Pane::Feeds,
+                                Pane::Feeds => Pane::Items,
+                                Pane::Items => Pane::Preview,
+                                Pane::Preview => Pane::Groups,
+                                Pane::Queue => Pane::Queue,
+                            };
+                        } else if key.code == KeyCode::BackTab {
+                            app.focus = match app.focus {
+                                Pane::Groups => Pane::Preview,
+                                Pane::Feeds => Pane::Groups,
+                                Pane::Items => Pane::Feeds,
+                                Pane::Preview => Pane::Items,
+                                Pane::Queue => Pane::Queue,
+                            };
+                        } else if key.code == KeyCode::Char('f')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            if let Some(q) = prompt("Search:") {
+                                app.search = q;
+                            } else {
+                                app.search.clear();
                             }
-                            _ => {}
-                        }
-                    } else if key.code == KeyCode::Char('?') {
-                        app.show_help = !app.show_help;
-                    } else if key.code == KeyCode::Char('Q') {
-                        app.focus = Pane::Queue;
-                    } else if key.code == KeyCode::Char('q')
-                        && app.focus != Pane::Items
-                        && app.focus != Pane::Queue
-                    {
-                        let groups = app.groups.lock().unwrap();
-                        data::save_db(&groups)?;
-                        app.config.save()?;
-                        break;
-                    } else if key.code == KeyCode::Char('u') && key.modifiers.is_empty() {
-                        app.config.ui.unread_only = !app.config.ui.unread_only;
-                        app.selected_item = 0;
-                    } else if key.code == KeyCode::Tab {
-                        app.focus = match app.focus {
-                            Pane::Groups => Pane::Feeds,
-                            Pane::Feeds => Pane::Items,
-                            Pane::Items => Pane::Preview,
-                            Pane::Preview => Pane::Groups,
-                            Pane::Queue => Pane::Queue,
-                        };
-                    } else if key.code == KeyCode::BackTab {
-                        app.focus = match app.focus {
-                            Pane::Groups => Pane::Preview,
-                            Pane::Feeds => Pane::Groups,
-                            Pane::Items => Pane::Feeds,
-                            Pane::Preview => Pane::Items,
-                            Pane::Queue => Pane::Queue,
-                        };
-                    } else if key.code == KeyCode::Char('f')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        if let Some(q) = prompt("Search:") {
-                            app.search = q;
+                            app.selected_item = 0;
                         } else {
-                            app.search.clear();
-                        }
-                        app.selected_item = 0;
-                    } else {
-                        match app.focus {
-                            Pane::Groups => handle_groups_key(key.code, app)?,
-                            Pane::Feeds => handle_feeds_key(key.code, app)?,
-                            Pane::Items => handle_items_key(key.code, app)?,
-                            Pane::Queue => handle_queue_key(key.code, app)?,
-                            _ => {}
+                            match app.focus {
+                                Pane::Groups => handle_groups_key(key.code, app)?,
+                                Pane::Feeds => handle_feeds_key(key.code, app)?,
+                                Pane::Items => handle_items_key(key.code, app)?,
+                                Pane::Queue => handle_queue_key(key.code, app)?,
+                                _ => {}
+                            }
                         }
                     }
                 }
-                Event::Resize(_, _) => {
-                    // just trigger a redraw on next loop
-                }
-                _ => {}
+            } else if let Event::Resize(_, _) = ev {
+                // just trigger a redraw on next loop
             }
         }
 
